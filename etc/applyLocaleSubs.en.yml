@@ -19,6 +19,11 @@ en.site.about_section.community_driven_1_html: |
 
 # The site strapline and the diaries label, as the 2021 tree had them.
 en.layouts.intro_text: OpenGeofiction is a user-made map of a fictional world, created using the OpenStreetMap software platform.
+# The front-page welcome for logged-out visitors: no Fastly, no OSMF. The
+# placeholders are dropped rather than repointed - their links are hardcoded
+# to OSM sites in the view; unused interpolation arguments are ignored.
+en.layouts.hosting_partners_2024_html: "Run by volunteers and funded by donations."
+en.layouts.welcome_tou_notice_html: "By using this website or other infrastructure provided by OpenGeofiction, you agree to the %{terms_link}."
 
 # The export tab's "too large" sources - the view on the ogf branch shows only
 # planet and overpass; these are their OGF endpoints (upstream #7271 made the
