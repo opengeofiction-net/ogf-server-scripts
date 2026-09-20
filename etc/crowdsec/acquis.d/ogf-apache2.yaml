@@ -1,0 +1,7 @@
+# The site's access log, written by Apache with the real client address
+# (mod_remoteip behind nginx). combined_ms appends %D; the stock apache2-logs
+# parser ignores the trailing field.
+filenames:
+  - /var/www/html/opengeofiction.net/log/access.log
+labels:
+  type: apache2

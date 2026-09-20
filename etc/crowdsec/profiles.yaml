@@ -1,0 +1,27 @@
+# Replaces the package's profiles.yaml. Profiles are evaluated in order and
+# stop at the first match, so the OGF one comes before the defaults.
+
+# Rotating UA: 24 h ban - an unambiguous bot signal
+name: ogf_rotating_ua_remediation
+filters:
+ - Alert.Remediation == true && Alert.GetScope() == "Ip" && Alert.GetScenario() == "ogf/rotating-ua-crawler"
+decisions:
+ - type: ban
+   duration: 24h
+on_success: break
+---
+name: default_ip_remediation
+filters:
+ - Alert.Remediation == true && Alert.GetScope() == "Ip"
+decisions:
+ - type: ban
+   duration: 4h
+on_success: break
+---
+name: default_range_remediation
+filters:
+ - Alert.Remediation == true && Alert.GetScope() == "Range"
+decisions:
+ - type: ban
+   duration: 4h
+on_success: break

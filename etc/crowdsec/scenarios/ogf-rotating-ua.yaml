@@ -1,0 +1,19 @@
+# Crawlers rotate their user-agent string per request from one address; real
+# users have one or two. A leaky bucket per source IP that only fills on a
+# NEW user agent: five distinct UAs on element pages inside the leak window
+# fires it. The ogf_rotating_ua_remediation profile bans for 24 h.
+type: leaky
+name: ogf/rotating-ua-crawler
+description: "Detect rotating user-agent strings on OGF element pages"
+filter: >
+  evt.Meta.service == 'http' &&
+  evt.Meta.http_path matches '^/(relation|node|way|changeset)/[0-9]+'
+groupby: evt.Meta.source_ip
+distinct: evt.Parsed.http_user_agent
+capacity: 4
+leakspeed: 2m
+blackhole: 15m
+labels:
+  service: http
+  type: crawl
+  remediation: true

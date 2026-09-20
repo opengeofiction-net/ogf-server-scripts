@@ -1,0 +1,19 @@
+# High-volume element-page scraping regardless of user agent: 31 requests
+# with no referer, or the bare site root as referer (the synthetic-referer
+# bypass), inside the leak window. Falls through to the default 4 h ban.
+type: leaky
+name: ogf/element-page-scrape
+description: "Detect high-frequency scraping of OGF element pages"
+filter: >
+  evt.Meta.service == 'http' &&
+  evt.Meta.http_path matches '^/(relation|node|way|changeset)/[0-9]+' &&
+  (evt.Parsed.referrer == '-' ||
+   evt.Parsed.referrer matches '^https?://(www[.])?opengeofiction[.]net/?$')
+groupby: evt.Meta.source_ip
+capacity: 30
+leakspeed: 30s
+blackhole: 15m
+labels:
+  service: http
+  type: crawl
+  remediation: true
