@@ -1,0 +1,11 @@
+[Unit]
+Description=Snapshot top output to sys-stats
+RequiresMountsFor=/opt/opengeofiction
+
+[Service]
+Type=oneshot
+User=ogf
+Group=ogf
+ExecStart=/opt/opengeofiction/ogf-server-scripts/bin/sysStats.sh
+[Install]
+WantedBy=default.target

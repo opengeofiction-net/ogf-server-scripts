@@ -1,0 +1,11 @@
+[Unit]
+Description=Top client IPs from the API access log
+
+[Timer]
+# daily at 08:08, as the old ogf crontab; output went to cron mail, now the journal
+OnCalendar=*-*-* 08:08:00
+Persistent=true
+Unit=ogfutil-topIps.service
+
+[Install]
+WantedBy=timers.target

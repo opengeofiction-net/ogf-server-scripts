@@ -1,0 +1,11 @@
+[Unit]
+Description=Dump recent changeset comments for review
+
+[Timer]
+# hourly at :11, as the old ogf crontab
+OnCalendar=*:11
+Persistent=true
+Unit=ogfutil-changesetComments.service
+
+[Install]
+WantedBy=timers.target

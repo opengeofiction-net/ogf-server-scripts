@@ -1,0 +1,11 @@
+[Unit]
+Description=Changeset summaries for the automated reports
+
+[Timer]
+# hourly at :36, as the old ogf crontab
+OnCalendar=*:36
+Persistent=true
+Unit=ogfutil-changesetInfo.service
+
+[Install]
+WantedBy=timers.target

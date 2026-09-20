@@ -1,0 +1,11 @@
+[Unit]
+Description=Top client IPs from the API access log
+RequiresMountsFor=/opt/opengeofiction
+
+[Service]
+Type=oneshot
+User=ogf
+Group=ogf
+ExecStart=/opt/opengeofiction/ogf-server-scripts/bin/topAccessIps.sh
+[Install]
+WantedBy=default.target

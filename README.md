@@ -58,7 +58,7 @@ See *Admin:Elevation process* in the wiki for what it produces and why, and
 This began as a Perl distribution written by Thilo Stapff for turning
 hand-drawn contours into elevation tiles, and grew the operational scripts
 later. It descends from
-[opengeofiction/OGF-terrain-tools](https://github.com/opengeofiction/OGF-terrain-tools),
+[opengeofiction/ogf-server-scripts](https://github.com/opengeofiction/ogf-server-scripts),
 which is where that work was published and which has been dormant since
 November 2024. Everything here is downstream of it, and the link is recorded
 in prose because a repository's own history does not say so once it stands on
@@ -71,7 +71,7 @@ do is written up in *Admin:Elevation process* - rather more than contour
 conversion, as it turns out. In September the elevation pipeline moved out
 altogether to [danu](https://github.com/opengeofiction-net/danu), which owns it
 end to end and leaves only the consuming half here. And the repository was
-renamed from `OGF-terrain-tools` to `ogf-server-scripts`, to say what it is
+renamed from `ogf-server-scripts` to `ogf-server-scripts`, to say what it is
 rather than what it was.
 
 ## Licence
