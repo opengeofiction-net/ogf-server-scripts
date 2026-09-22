@@ -28,7 +28,11 @@ PLANET_DUMP_NG_THREADS=6
 LINODECLI=~/.local/bin/linode-cli
 REGION=us-west
 TYPE=g6-standard-6
-IMAGE=linode/ubuntu24.04
+# Debian 13, as the API server: pg_dump refuses to dump a server newer than
+# itself, and this image's postgresql-client must therefore be the server's
+# major version. Ubuntu 24.04 ships client 16 and failed against PostgreSQL 17
+# on the first run after the 2026-09-20 rebuild. Bump both together.
+IMAGE=linode/debian13
 VLAN_LABEL=backup
 VLAN_HOST_IP=10.98.117.1 # 98=b; 117=u
 VLAN_CLIENT_IP=10.98.117.2
@@ -182,7 +186,7 @@ runcmd:
   - echo "PermitRootLogin no" >> /etc/ssh/sshd_config
   - sed -i '/PasswordAuthentication/d' /etc/ssh/sshd_config
   - echo "PasswordAuthentication no" >> /etc/ssh/sshd_config
-  - systemctl restart sshd
+  - systemctl restart ssh.service || systemctl restart sshd.service
   # initialise OGF scripts
   - mkdir -p /opt/opengeofiction/tmp
   - chown -R ogf:ogf /opt/opengeofiction
@@ -241,24 +245,32 @@ echo "provisioning... $(date) done ($status)"
 
 #### section 4: do the backup ##################################################
 # money shot: now run the backup & planet dump on the new linode
+# the remote shell exits non-zero on failure, which ssh returns to us, so a
+# failed dump stops here instead of going on to copy files that do not exist
+rc=0
 ssh -T -i ${sshkeypriv} -oUserKnownHostsFile=${sshkeyknownhost} ogf@${VLAN_CLIENT_IP} <<EOF
 # create the postgres backup dump file
 echo "backing up to ${backup_pg}"
 pg_dump -h ${VLAN_HOST_IP} --format=custom --file=${backup_pg} ${DB}
 if [ \$? -ne 0 ]; then
 	echo "ERROR: backup failed"
-else
-	mkdir ${backup_tmp}
-	cd ${backup_tmp}
-	# run planet-dump-ng
-	${PLANET_DUMP_NG} --pbf=../${backup_pbf} --dump-file=../${backup_pg} --max-concurrency=${PLANET_DUMP_NG_THREADS}
-	if [ \$? -ne 0 ]; then
-		echo "ERROR: planet-dump-ng failed"
-	fi
-	cd ..
-	#rm -r ${backup_tmp}
+	exit 1
 fi
+mkdir ${backup_tmp}
+cd ${backup_tmp}
+# run planet-dump-ng
+${PLANET_DUMP_NG} --pbf=../${backup_pbf} --dump-file=../${backup_pg} --max-concurrency=${PLANET_DUMP_NG_THREADS}
+if [ \$? -ne 0 ]; then
+	echo "ERROR: planet-dump-ng failed"
+	exit 1
+fi
+cd ..
+#rm -r ${backup_tmp}
 EOF
+if [ $? -ne 0 ]; then
+	echo "ERROR: the backup failed on the remote server; nothing to copy"
+	exit 1
+fi
 
 #### section 5: copy files locally and publish #################################
 # copy the dmp file locally
@@ -272,6 +284,7 @@ if [ ${timeframe} != "daily" ]; then
 		fi
 	else
 		echo "ERROR: failed to copy ${backup_pg} locally $?"
+		rc=1
 	fi
 fi
 
@@ -294,4 +307,9 @@ if [ $? -eq 0 ]; then
 	fi
 else
 	echo "ERROR: failed to copy ${backup_pbf} locally $?"
+	rc=1
 fi
+
+# non-zero so planet-backup.service is marked failed and the daily review
+# sees it; the EXIT trap still deletes the Linode and preserves this status
+exit ${rc}
