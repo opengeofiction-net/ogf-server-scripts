@@ -18,6 +18,15 @@ Patterns replaced:
   - Wikilink forms [URL display_text] preserve display text in template params
   - {{#multimaps:...}} blocks are protected — URLs inside them are never modified
 
+Content that is not wikitext is never rewritten, and its URLs are not reported
+as orphans either:
+  - <pre>/<nowiki>/<syntaxhighlight>/<source> blocks — MediaWiki does not parse
+    wikitext there, so a template call inside one displays as literal braces.
+    These hold code samples, command lines and hand-written drafts, including
+    Markdown message templates people keep on their user pages.
+  - Markdown links [text](url) — drafts for the OGF mailbox, which renders
+    Markdown; the wiki shows them as plain text.
+
 Credentials: ~/ogf-user.env (USERNAME, PASSWORD)
 """
 
@@ -319,6 +328,101 @@ _WRAPPER_DEPTH = {"pre": 0, "code": 1, "nowiki": 2}
 # enclosed by one of these is left untouched.
 _SKIP_IF_ENCLOSING = {"pre", "nowiki", "includeonly", "noinclude", "onlyinclude"}
 
+# ---------------------------------------------------------------------------
+# Regions the fixer never rewrites
+# ---------------------------------------------------------------------------
+# Two kinds of content are not wikitext at all, so every URL inside them must be
+# left exactly as typed:
+#
+#   * tags MediaWiki does not parse (pre, nowiki, syntaxhighlight, source) — a
+#     template call written into one is displayed as literal braces;
+#   * Markdown links [text](url) — hand-written drafts for another platform
+#     (the OGF mailbox renders Markdown), not wiki markup.
+#
+# Both appear inside hand-written drafts that are *stored* on wiki pages: the
+# 2026-09-24 report came from User:NM$l, whose "告非许可用户编辑书" section is a
+# Markdown message template kept in a <pre> block.  The fixer rewrote it twice
+# (2026-05-29 and again 2026-09-24 after the author reverted the first edit),
+# producing `{{OGF user|…%E5%AE%9D)」或「[NM$l](https:}}` — the URL pattern's
+# name capture had run past the closing ")" of the first Markdown link, through
+# the prose between the two links, and into the second one.
+#
+# So: protect both kinds of region with placeholders for the whole transform and
+# restore them afterwards — after the orphan scan, so their URLs are never
+# reported as missed conversions either.
+_NON_PARSED_TAG_PAT = re.compile(
+    r"<(/?)(pre|nowiki|syntaxhighlight|source)(?:\s[^>]*)?>", re.IGNORECASE
+)
+_MARKDOWN_LINK_PAT = re.compile(r"!?\[[^\]\n]*\]\([^()\s]*\)")
+
+# A username is a MediaWiki title: it may hold non-ASCII characters and %XX
+# escapes, but never brackets, braces, quotes, parens or whitespace — and prose
+# punctuation (「」，。、；) never follows it *inside* a URL.  Anything in this
+# class ends the name, so a trailing ")" or "」" can no longer be swallowed into
+# a template parameter.  The ASCII comma and semicolon are in the class too:
+# a URL ending a clause ("… see https://…/user/Foo, and …") is common, a
+# username containing a comma is not.
+_NAME_STOP_CHARS = (
+    r"[^/?\s#\[\]{}<>|()「」『』【】〔〕《》（），。、；：！？…“”‘’,;]"
+)
+
+
+def _non_parsed_spans(text):
+    """[(start, end)] of every <pre>/<nowiki>/<syntaxhighlight>/<source> block.
+
+    A block that is never closed runs to the end of the page.
+    """
+    spans = []
+    open_stack = []                         # [(name, start)]
+    for m in _NON_PARSED_TAG_PAT.finditer(text):
+        name = m.group(2).lower()
+        if not m.group(1):                  # opening tag
+            open_stack.append((name, m.start()))
+        elif open_stack and open_stack[-1][0] == name:
+            _name, start = open_stack.pop()
+            if not open_stack:
+                spans.append((start, m.end()))
+    if open_stack:
+        spans.append((open_stack[0][1], len(text)))
+    return spans
+
+
+def _protect_non_wikitext(text):
+    """Hide regions that are not wikitext behind placeholders.
+
+    Returns (new_text, {placeholder: original}).  Covers unparsed tag blocks
+    (<pre>, <nowiki>, <syntaxhighlight>, <source>) and Markdown links
+    [text](url).  Overlapping matches are resolved in favour of the earliest
+    start, so no placeholder ever lands inside another one — that is what makes
+    a single flat restore pass correct.  (`[Mapillary](<nowiki>https://…</nowiki>)`
+    and `<pre>[text](https://…)</pre>` both end up as one opaque region;
+    restoring them in sequence would leak a placeholder back into the page.)
+    """
+    spans = _non_parsed_spans(text)
+    spans += [m.span() for m in _MARKDOWN_LINK_PAT.finditer(text)]
+    spans.sort()
+
+    protected = {}
+    out = []
+    pos = 0
+    for start, end in spans:
+        if start < pos:                     # inside a region already taken
+            continue
+        ph = f"__NOWIKI_{len(protected)}__"
+        protected[ph] = text[start:end]
+        out.append(text[pos:start])
+        out.append(ph)
+        pos = end
+    out.append(text[pos:])
+    return "".join(out), protected
+
+
+def _restore_protected(text, protected):
+    """Put placeholder'd originals back."""
+    for ph, original in protected.items():
+        text = text.replace(ph, original)
+    return text
+
 
 def _scan_wrapper_tags(text):
     """Return [(start, end, is_close, name)] for every wrapper/container tag."""
@@ -427,6 +531,8 @@ def replace_api_links(content):
         start, end = m.start(), m.end()
         if start < pos or _inside_template(content, start):
             continue
+        if content[max(0, start - 2):start] == "](":
+            continue  # Markdown link target — not wikitext, leave it alone
 
         new_start, new_end, swallowed, enclosing = _swallow_wrappers(
             content, tags, start, end
@@ -517,6 +623,14 @@ def transform_wikitext(content, territory_map):
     content, api_changes = replace_api_links(content)
     changes.extend(api_changes)
 
+    # ---- Pass 0b: Protect content that is not wikitext ------------------
+    # <pre>/<nowiki>/<syntaxhighlight>/<source> blocks and Markdown links are
+    # hidden behind placeholders for the rest of the transform: the URL passes
+    # below must not rewrite drafts and examples that are stored verbatim on
+    # the page.  Done after the api pass so it keeps swallowing a wrapper that
+    # holds nothing but the endpoint URL.
+    content, nonwikitext_protected = _protect_non_wikitext(content)
+
     # ---- Pass 1: Replace opengeofiction.net object/map URLs ------------
     # Map URL:  #map=Z/LAT/LON[&...]
     # Order matters: object URLs first so their numeric IDs aren't consumed
@@ -571,12 +685,13 @@ def transform_wikitext(content, territory_map):
     # Wikilink form first: [https://.../user/NAME(/history)? TEXT] → {{OGF user|NAME}}
     # Display text is dropped since the template generates it from the username.
     user_wikilink_history_pat = re.compile(
-        r"\[https?://(?:www\.)?opengeofiction\.net/user/([^/]+?)/history"
+        r"\[https?://(?:www\.)?opengeofiction\.net/user/("
+        + _NAME_STOP_CHARS + r"+?)/history"
         r"(?:[?#][^\s\]]*)?\s+"
         r"[^\]]*\]"
     )
     user_wikilink_pat = re.compile(
-        r"\[https?://(?:www\.)?opengeofiction\.net/user/([^/>?\s#]+)"
+        r"\[https?://(?:www\.)?opengeofiction\.net/user/(" + _NAME_STOP_CHARS + r"+)"
         r"(?:[?#][^\s\]]*)?\s+"
         r"[^\]]*\]"
     )
@@ -619,11 +734,16 @@ def transform_wikitext(content, territory_map):
     )
 
     # Bare URL form (not inside [...])
+    # The name stops at _NAME_STOP_CHARS, so trailing prose punctuation (a
+    # closing ")" from a Markdown link, "」", "，", "。") can never be swallowed
+    # into the template parameter.
     user_bare_history_pat = re.compile(
-        r"https?://(?:www\.)?opengeofiction\.net/user/([^/?\s]+)/history(?:[?#][^\s\]<>]*)?"
+        r"https?://(?:www\.)?opengeofiction\.net/user/("
+        + _NAME_STOP_CHARS + r"+?)/history(?:[?#][^\s\]<>]*)?"
     )
     user_bare_pat = re.compile(
-        r"https?://(?:www\.)?opengeofiction\.net/user/([^/?\s#]+)(?:[?#][^\s\]<>]*)?"
+        r"https?://(?:www\.)?opengeofiction\.net/user/(" + _NAME_STOP_CHARS + r"+)"
+        r"(?:[?#][^\s\]<>]*)?"
     )
 
     def _user_bare_repl(m, history=False):
@@ -649,7 +769,7 @@ def transform_wikitext(content, territory_map):
     # Wikilink form first: [https://.../message/new/NAME TEXT]
     msg_wikilink_pat = re.compile(
         r"\[https?://(?:www\.)?opengeofiction\.net/message/new/"
-        r"([^\]/\s?#]+)"
+        r"(" + _NAME_STOP_CHARS + r"+)"
         r"(?:[?#][^\s\]]*)?\s+"
         r"([^\]]+)\]"
     )
@@ -666,7 +786,7 @@ def transform_wikitext(content, territory_map):
     # Bare URL form (not inside [...])
     msg_bare_pat = re.compile(
         r"https?://(?:www\.)?opengeofiction\.net/message/new/"
-        r"([^\]/<\s?#]+)"
+        r"(" + _NAME_STOP_CHARS + r"+)"
         r"(?:[?#][^\s\]<>]*)?"
     )
 
@@ -1061,16 +1181,22 @@ def transform_wikitext(content, territory_map):
 
     content = territory_re.sub(_tid_repl, content)
 
-    # ---- Pass 3: Restore protected blocks ------------
+    # ---- Pass 4: Find orphan URLs (bare OGF/OSM links not converted) ----
+    # These are URLs the script did not know how to handle.  Reporting them
+    # helps identify new patterns that could be templatized in future.
+    # Run while the non-wikitext regions are still placeholders, so URLs inside
+    # a <pre> block or a Markdown link are not miscounted as missed conversions.
+    orphans = find_orphan_urls(content)
+
+    # ---- Pass 5: Restore every protected block ------------
+    # The non-wikitext regions go back first: a <pre> block can contain a
+    # {{#multimaps:...}} placeholder that was created before them, so the
+    # remaining restores must run after it is back in the text.
+    content = _restore_protected(content, nonwikitext_protected)
     for ph, original in protected.items():
         content = content.replace(ph, original)
     for ph, original in diary_protected.items():
         content = content.replace(ph, original)
-
-    # ---- Pass 4: Find orphan URLs (bare OGF/OSM links not converted) ----
-    # These are URLs the script did not know how to handle.  Reporting them
-    # helps identify new patterns that could be templatized in future.
-    orphans = find_orphan_urls(content)
 
     return content, changes, orphans
 
