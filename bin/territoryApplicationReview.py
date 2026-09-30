@@ -377,6 +377,7 @@ def render(rows, managers, pingable):
     if active:
         lines.append("\n**In progress**")
         lines += [line(r) for r in active]
+    lines.append("\n_Automated weekly review - posted every Sunday._")
     return "\n".join(lines)
 
 # ─── Main ────────────────────────────────────────────────────────────────────
