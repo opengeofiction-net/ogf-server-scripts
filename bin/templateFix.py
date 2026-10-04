@@ -12,7 +12,9 @@ Patterns replaced:
   - OSM map URLs → {{coordosm|latitude=|longitude=|zoom=}}
   - OGF way/relation/node/changeset URLs → respective templates
   - OGF user profile URLs → {{OGF user|username}} or {{OGF user|username|history}}
-  - OGF message/new URLs → {{OGF user|username|msg}} or {{OGF user|username|msg|text=...}}
+  - OGF message(s)/new URLs → {{OGF user|username|msg}} or {{OGF user|username|msg|text=...}}
+  - This wiki's own page URLs (https://wiki.opengeofiction.net/index.php/Title) →
+    [[Title]] — a self-link should be an internal wikilink, not an external URL
   - The OGF API endpoint (https://opengeofiction.net/api) → {{api}}, swallowing
     any <pre>/<code>/<nowiki> wrapper holding nothing but that URL
   - Wikilink forms [URL display_text] preserve display text in template params
@@ -28,6 +30,11 @@ as orphans either:
     Markdown; the wiki shows them as plain text.
 
 Credentials: ~/ogf-user.env (USERNAME, PASSWORD)
+
+Output: without --changes-only the run prints its full progress log.  With
+--changes-only only the replacements actually applied are printed to stdout,
+one block per changed page (the progress log is suppressed) — used by the cron
+wrapper so the channel post contains nothing but the replacements.
 """
 
 import bisect
@@ -56,6 +63,16 @@ USER_AGENT = "Brothie/1.0 (OGF Template Bot)"
 REFERER = "https://opengeofiction.net/"
 CREDENTIALS_PATH = Path.home() / "ogf-user.env"
 VAR_DIR = Path(__file__).parent.parent / "var"
+
+# Progress log.  `--changes-only` (set in main) turns it off, so stdout carries
+# nothing but the replacement report.
+_VERBOSE = True
+
+
+def _log(*args, **kwargs):
+    """Print an informational progress line, unless --changes-only is active."""
+    if _VERBOSE:
+        print(*args, **kwargs)
 
 
 def write_daily_book(entry):
@@ -101,7 +118,7 @@ def api_get(opener, params):
         resp = opener.open(req)
         return json.loads(resp.read().decode())
     except urllib.error.HTTPError as exc:
-        print(f"  HTTP Error {exc.code}: {exc.reason}")
+        print(f"  HTTP Error {exc.code}: {exc.reason}", file=sys.stderr)
         return None
 
 
@@ -113,7 +130,7 @@ def api_post(opener, params):
         resp = opener.open(req)
         return json.loads(resp.read().decode())
     except urllib.error.HTTPError as exc:
-        print(f"  HTTP Error {exc.code}: {exc.reason}")
+        print(f"  HTTP Error {exc.code}: {exc.reason}", file=sys.stderr)
         return None
 
 
@@ -250,7 +267,8 @@ def get_page_content(opener, title):
     if not data:
         return None, None
     if "error" in data:
-        print(f"  API error: {data['error'].get('code')} — {data['error'].get('info')}")
+        print(f"  API error: {data['error'].get('code')} — {data['error'].get('info')}",
+              file=sys.stderr)
         return None, None
     for pid, page in data.get("query", {}).get("pages", {}).items():
         if pid == "-1":
@@ -296,7 +314,7 @@ def load_territory_lookup():
         data = json.loads(resp.read().decode())
         return {item["ogfId"]: item["rel"] for item in data}
     except Exception as exc:
-        print(f"Failed to load territory lookup: {exc}")
+        print(f"Failed to load territory lookup: {exc}", file=sys.stderr)
         return {}
 
 
@@ -365,6 +383,40 @@ _MARKDOWN_LINK_PAT = re.compile(r"!?\[[^\]\n]*\]\([^()\s]*\)")
 _NAME_STOP_CHARS = (
     r"[^/?\s#\[\]{}<>|()「」『』【】〔〕《》（），。、；：！？…“”‘’,;]"
 )
+
+# ---------------------------------------------------------------------------
+# This wiki's own page URLs → [[Title]]
+# ---------------------------------------------------------------------------
+# A URL to this wiki's own index.php is an external-link rendering of an
+# internal page; [[Title]] is what it should be (a blue internal link, not an
+# external-link arrow).  Only the plain path form is handled — the transform
+# bails on a query string or a section fragment, which do not map to a
+# wikilink without guessing (the legacy `.XX`-escaped anchors in particular
+# do not decode unambiguously).  Trailing prose punctuation is not part of a
+# title, so it is stripped.
+_WIKI_SELF_TOKEN = (
+    r"https?://(?:www\.)?wiki\.opengeofiction\.net/(?:(?:wiki|w)/)?index\.php/"
+    r"[^\s\[\]<>{}|]+"
+)
+_WIKI_WIKILINK_PAT = re.compile(r"\[(" + _WIKI_SELF_TOKEN + r")(?:\s+[^\]]*)?\]")
+_WIKI_BARE_PAT = re.compile(r"(" + _WIKI_SELF_TOKEN + r")")
+# Trailing prose punctuation is not part of a page title.  Sentence punctuation
+# always goes; a closing bracket only goes when its opener is absent (an
+# unbalanced bracket is prose — `(see URL)` — while `Foo (bar)` keeps its own).
+_TITLE_TRAIL = ".,;:!?…\"'“”‘’，。、；：！？"
+_BRACKET_OPENERS = {")": "(", "]": "[", "}": "{", "」": "「", "』": "『",
+                    "】": "【", "》": "《", "〉": "〈", "）": "（", "］": "[", "｝": "{"}
+
+
+def _strip_title_tail(title):
+    """Drop sentence punctuation, and unbalanced closing brackets, from a title."""
+    title = title.rstrip(_TITLE_TRAIL)
+    while title and title[-1] in _BRACKET_OPENERS:
+        opener = _BRACKET_OPENERS[title[-1]]
+        if opener in title[:-1]:
+            break                            # balanced — the bracket is the title's own
+        title = title[:-1]
+    return title
 
 
 def _non_parsed_spans(text):
@@ -631,6 +683,27 @@ def transform_wikitext(content, territory_map):
     # holds nothing but the endpoint URL.
     content, nonwikitext_protected = _protect_non_wikitext(content)
 
+    # ---- Pass 0c: This wiki's own page URLs → [[Title]] -----------------
+    # Run on the protected text so a self-link inside a <pre>/<nowiki> draft or
+    # a Markdown link is left alone, like every other URL.
+    def _wiki_self_repl(m):
+        if _inside_template(content, m.start()):
+            return m.group(0)                # a wikilink would corrupt the parameter
+        url = m.group(1)
+        rest = url.split("/index.php/", 1)[1]
+        if "?" in rest or "#" in rest:
+            return m.group(0)                # ?action=/?oldid=/anchor — not a plain page link
+        decoded = urllib.parse.unquote(rest).replace("_", " ")
+        core = _strip_title_tail(decoded)
+        if not core.strip():
+            return m.group(0)
+        target = f"[[{core.strip()}]]"
+        changes.append(f"wiki link {rest} → {target}")
+        return target + decoded[len(core):]  # keep prose punctuation after the URL
+
+    content = _WIKI_WIKILINK_PAT.sub(_wiki_self_repl, content)
+    content = _WIKI_BARE_PAT.sub(_wiki_self_repl, content)
+
     # ---- Pass 1: Replace opengeofiction.net object/map URLs ------------
     # Map URL:  #map=Z/LAT/LON[&...]
     # Order matters: object URLs first so their numeric IDs aren't consumed
@@ -762,13 +835,15 @@ def transform_wikitext(content, territory_map):
         lambda m: _user_bare_repl(m, history=False), content
     )
 
-    # OGF message/new URLs: opengeofiction.net/message/new/NAME
+    # OGF message(s)/new URLs: opengeofiction.net/message/new/NAME
+    # The canonical route is plural (`/messages/new/NAME`; the singular 301s to
+    # it, and Template:OGF user emits the singular), so accept both spellings.
     # {{OGF user|NAME|msg}} or {{OGF user|NAME|msg|text=display text}}
     # Username may contain URL-encoded characters (%20, +, etc.)
 
-    # Wikilink form first: [https://.../message/new/NAME TEXT]
+    # Wikilink form first: [https://.../message(s)/new/NAME TEXT]
     msg_wikilink_pat = re.compile(
-        r"\[https?://(?:www\.)?opengeofiction\.net/message/new/"
+        r"\[https?://(?:www\.)?opengeofiction\.net/messages?/new/"
         r"(" + _NAME_STOP_CHARS + r"+)"
         r"(?:[?#][^\s\]]*)?\s+"
         r"([^\]]+)\]"
@@ -785,7 +860,7 @@ def transform_wikitext(content, territory_map):
 
     # Bare URL form (not inside [...])
     msg_bare_pat = re.compile(
-        r"https?://(?:www\.)?opengeofiction\.net/message/new/"
+        r"https?://(?:www\.)?opengeofiction\.net/messages?/new/"
         r"(" + _NAME_STOP_CHARS + r"+)"
         r"(?:[?#][^\s\]<>]*)?"
     )
@@ -1262,14 +1337,14 @@ def check_bot_permission():
         with urllib.request.urlopen(req, timeout=15) as resp:
             raw = resp.read().decode("utf-8")
     except Exception as e:
-        print(f"  WARNING: Could not load bot control page: {e}")
+        print(f"  WARNING: Could not load bot control page: {e}", file=sys.stderr)
         return False
 
     if "{{permission|yes}}" in raw:
-        print("  ✓ Bot permission granted")
+        _log("  ✓ Bot permission granted")
         return True
     else:
-        print("  ✗ Bot permission NOT granted (missing {{permission|yes}})")
+        _log("  ✗ Bot permission NOT granted (missing {{permission|yes}})")
         return False
 
 
@@ -1277,8 +1352,12 @@ def check_bot_permission():
 # Main
 # --------------------------------------------------------------------------
 def main():
+    global _VERBOSE
     dry_run = "--dry-run" in sys.argv
     use_recent = "--recent" in sys.argv
+    # --changes-only: stdout carries nothing but the replacements actually
+    # applied (the progress log is suppressed).  Used by the cron wrapper.
+    _VERBOSE = "--changes-only" not in sys.argv
 
     # --pages FILE: read page titles from FILE (one per line) and process all
     pages_file = None
@@ -1292,25 +1371,25 @@ def main():
             with open(pages_file) as f:
                 page_list = [line.strip() for line in f if line.strip()]
         except FileNotFoundError:
-            print(f"Error: Pages file not found: {pages_file}")
+            print(f"Error: Pages file not found: {pages_file}", file=sys.stderr)
             sys.exit(1)
         if not page_list:
-            print(f"Error: No pages found in {pages_file}")
+            print(f"Error: No pages found in {pages_file}", file=sys.stderr)
             sys.exit(1)
-        print(f"Loaded {len(page_list)} page(s) from {pages_file}")
+        _log(f"Loaded {len(page_list)} page(s) from {pages_file}")
 
     creds = load_credentials()
     username = creds.get("USERNAME", "")
     password = creds.get("PASSWORD", "")
     if not username or not password:
-        print("Error: No credentials in ~/ogf-user.env")
+        print("Error: No credentials in ~/ogf-user.env", file=sys.stderr)
         sys.exit(1)
 
     territory_map = load_territory_lookup()
     if not territory_map:
-        print("Error: Failed to load territory lookup")
+        print("Error: Failed to load territory lookup", file=sys.stderr)
         sys.exit(1)
-    print(f"Loaded {len(territory_map)} territory IDs")
+    _log(f"Loaded {len(territory_map)} territory IDs")
 
     # Set up session with cookie jar
     cj = http.cookiejar.CookieJar()
@@ -1319,12 +1398,12 @@ def main():
     )
 
     if not login(opener, username, password):
-        print("Error: Login failed")
+        print("Error: Login failed", file=sys.stderr)
         sys.exit(1)
-    print("Logged in to wiki")
+    _log("Logged in to wiki")
 
     if not check_bot_permission() and not dry_run:
-        print("Bot permission denied, exiting")
+        print("Bot permission denied, exiting", file=sys.stderr)
         sys.exit(1)
 
     # Build the list of titles to process
@@ -1333,13 +1412,13 @@ def main():
     elif use_recent:
         titles = get_recently_changed_pages(opener)
         if not titles:
-            print("No recently changed pages found — exiting")
+            _log("No recently changed pages found — exiting")
             sys.exit(0)
-        print(f"Found {len(titles)} pages changed in the last 24 hours")
+        _log(f"Found {len(titles)} pages changed in the last 24 hours")
         if dry_run:
-            print("Dry-run mode — listing pages that would be checked:")
+            _log("Dry-run mode — listing pages that would be checked:")
             for t in titles:
-                print(f"  {t}")
+                _log(f"  {t}")
             sys.exit(0)
     else:
         # Decide page source based on current minute:
@@ -1349,16 +1428,17 @@ def main():
         if minute < 30:
             pages = get_category_pages(opener)
             if not pages:
-                print("Error: No pages found in Category:Territory application")
+                print("Error: No pages found in Category:Territory application",
+                      file=sys.stderr)
                 sys.exit(1)
             title = random.choice(pages)
-            print(f"Found {len(pages)} pages in category")
+            _log(f"Found {len(pages)} pages in category")
         else:
             title = get_random_page(opener)
             if not title:
-                print("Error: Could not get random page")
+                print("Error: Could not get random page", file=sys.stderr)
                 sys.exit(1)
-            print(f"Random page selected")
+            _log("Random page selected")
         titles = [title]
 
     total_edits = 0
@@ -1368,20 +1448,20 @@ def main():
         # URLs — {{api}} documents the endpoint inside <includeonly>, and the
         # action log quotes orphan URLs — so never edit them.
         if title.startswith("Template:") or title.startswith("User:Brothie"):
-            print(f"Skipping {title} (excluded page)")
+            _log(f"Skipping {title} (excluded page)")
             continue
         if len(titles) > 1:
-            print(f"\n--- [{idx + 1}/{len(titles)}] {title} ---")
+            _log(f"\n--- [{idx + 1}/{len(titles)}] {title} ---")
         else:
-            print(f"Selected: {title}")
+            _log(f"Selected: {title}")
 
         content, pageid = get_page_content(opener, title)
         if content is None:
-            print(f"Error: Could not fetch content for {title}")
+            print(f"Error: Could not fetch content for {title}", file=sys.stderr)
             if len(titles) > 1:
                 continue
             sys.exit(1)
-        print(f"Page ID {pageid}, {len(content)} characters")
+        _log(f"Page ID {pageid}, {len(content)} characters")
 
         new_content, changes, orphans = transform_wikitext(content, territory_map)
 
@@ -1424,30 +1504,44 @@ def main():
         write_daily_book(entry)
 
         if orphans:
-            print(f"\n{len(orphans)} orphan URL(s) found (not converted):")
+            _log(f"\n{len(orphans)} orphan URL(s) found (not converted):")
             for url in orphans:
-                print(f"  {url}")
+                _log(f"  {url}")
 
         if not changes:
-            print("No replacements needed")
+            _log("No replacements needed")
             continue
 
-        print(f"\n{len(changes)} replacement(s) to apply:")
-        for c in changes:
-            print(f"  {c}")
         total_edits += len(changes)
         total_pages_changed += 1
 
         if dry_run:
-            print("Dry-run mode — edit not saved")
+            _log(f"\n{len(changes)} replacement(s) would be applied to {title}:")
+            for c in changes:
+                _log(f"  {c}")
+            _log("Dry-run mode — edit not saved")
             continue
 
-        if edit_page(opener, title, new_content,
-                     "Replace bare territory IDs and map URLs with wiki templates",
-                     pageid):
-            print(f"Successfully updated {title}")
-        else:
-            print(f"Failed to save edit for {title}")
+        # The report below is printed even under --changes-only: this is the
+        # material the cron wrapper posts, and it is the ONLY thing on stdout
+        # then.  A failed save is shown too, so it cannot pass as a clean run.
+        if not edit_page(opener, title, new_content,
+                         "Replace bare territory IDs and map URLs with wiki templates",
+                         pageid):
+            print(title)
+            for c in changes:
+                print(f"  {c}")
+            print("  ⚠ SAVE FAILED")
+            print()
+            if len(titles) > 1 and idx < len(titles) - 1:
+                time.sleep(1)
+            continue
+
+        print(title)
+        for c in changes:
+            print(f"  {c}")
+        print()
+        _log(f"Successfully updated {title}")
 
         # Pause between pages in batch mode to avoid hammering the API
         if len(titles) > 1 and idx < len(titles) - 1:
@@ -1455,12 +1549,12 @@ def main():
 
     # Summary for batch mode
     if len(titles) > 1:
-        print(f"\n=== Summary ===")
-        print(f"  Pages processed: {len(titles)}")
-        print(f"  Pages changed:   {total_pages_changed}")
-        print(f"  Total edits:     {total_edits}")
+        _log(f"\n=== Summary ===")
+        _log(f"  Pages processed: {len(titles)}")
+        _log(f"  Pages changed:   {total_pages_changed}")
+        _log(f"  Total edits:     {total_edits}")
         if dry_run:
-            print("  (dry-run mode — no edits saved)")
+            _log("  (dry-run mode — no edits saved)")
 
 
 if __name__ == "__main__":
