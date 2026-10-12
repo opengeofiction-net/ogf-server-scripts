@@ -1,0 +1,16 @@
+#
+#  Systemd service file to reboot the host when a package update requires it
+#
+
+[Unit]
+Description=Reboot if a package update requires it
+
+[Service]
+Type=oneshot
+# root: nothing less can reboot the machine. The script does almost nothing
+# else - it reads two files under /run and asks systemd for the reboot
+EnvironmentFile=-/etc/opengeofiction/maintenance-reboot.env
+ExecStart=/opt/opengeofiction/ogf-server-scripts/bin/maintenanceReboot.sh
+
+[Install]
+WantedBy=default.target

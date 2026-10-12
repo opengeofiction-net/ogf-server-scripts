@@ -1,0 +1,26 @@
+#
+#  Systemd timer file for the weekly maintenance window reboot
+#
+
+[Unit]
+Description=Weekly maintenance window reboot, if a package update requires it
+
+[Timer]
+# The OGF maintenance window is Thursday 04:00-06:00 UTC. Two slots in it: a
+# host held back at the first by a running backup is rebooted at the second,
+# still inside the window, rather than waiting a week. With the delay below
+# the slots are 04:00-04:30 and 05:15-05:45
+OnCalendar=Thu *-*-* 04:00:00 UTC
+OnCalendar=Thu *-*-* 05:15:00 UTC
+# Each host takes its own slot in the half hour and keeps it: the fleet does
+# not all go down together, and a host's reboot time is predictable from one
+# week to the next. The delay is derived from the machine id, not drawn afresh
+RandomizedDelaySec=30m
+FixedRandomDelay=yes
+# Deliberately NOT Persistent: a missed slot must not fire on the next boot,
+# which would be a reboot at an arbitrary time of day. Thursday comes again
+Persistent=false
+Unit=maintenance-reboot.service
+
+[Install]
+WantedBy=timers.target
