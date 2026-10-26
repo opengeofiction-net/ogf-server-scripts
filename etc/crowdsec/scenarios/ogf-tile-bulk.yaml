@@ -1,0 +1,24 @@
+# Bulk tile download on the public tile server.
+#
+# Fires when one source address makes more than 8,000 tile requests in a
+# 10-minute window. Legitimate clients are capped at 4,000 served tiles per
+# 10 minutes by mod_qos (conf-available/ogf-tile-rate-limit.conf), so anything
+# above 8,000 is a client retrying its 429s, not a person browsing or
+# exporting. Measured 2026-10-26: the bulk QGIS client reached 26,000 req/min
+# (260,000 per 10 min) while retrying.
+#
+# Private/RFC1918 sources are whitelisted by crowdsecurity/whitelists, so a
+# VPN test address will never trigger this - test from a public address, or
+# verify the match with `cscli explain`.
+type: leaky
+name: ogf/tile-bulk
+description: "Bulk tile download: >8000 tile requests from one source in 10 minutes"
+filter: "evt.Meta.log_type == 'http_access-log' && evt.Meta.service == 'http' && evt.Meta.http_path contains '.png'"
+groupby: evt.Meta.source_ip
+capacity: 8000
+leakspeed: 10m
+blackhole: 10m
+labels:
+  service: http
+  type: tile-bulk
+  remediation: true
