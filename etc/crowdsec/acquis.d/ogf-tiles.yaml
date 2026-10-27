@@ -1,5 +1,0 @@
-filenames:
-  - /var/www/html/tiles04.opengeofiction.net/logs/access.log
-labels:
-  type: apache2
-source: file

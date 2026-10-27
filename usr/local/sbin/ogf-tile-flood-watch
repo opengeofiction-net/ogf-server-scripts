@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""Ban bulk tile downloaders from the tiles04 access log.
+
+Runs from a systemd timer every minute. Reads only the lines appended since
+the last run, counts tile requests per source address over a short window,
+and adds a 12 hour cscli decision for any address above the threshold.
+
+This exists because CrowdSec's scenario engine could not keep up with a
+27,000 requests/minute retry storm: the tile acquisition poured millions of
+events into per-IP leaky buckets, the agent grew to 7.5 GB and was OOM-killed
+twice (2026-10-27 16:19 and 17:49), and no ban was issued while the flood was
+running. Counting lines and calling cscli directly does the same job in
+constant memory and lands a ban within a minute.
+
+Threshold: 12,000 tile requests in 180 s (4,000/min). The heaviest legitimate
+client measured on tiles04 peaked at 2,083 requests in one minute and ~3,030
+in ten minutes; the bulk QGIS client ran at ~27,000/minute. IPv6 sources also
+get their /64 banned, because this client rotates its interface address.
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+
+LOG = "/var/www/html/tiles04.opengeofiction.net/logs/access.log"
+STATE = "/var/lib/ogf-tile-watch/state.json"
+MAX_READ = 512 * 1024 * 1024
+BAN_DURATION = "12h"
+REASON = "tile bulk download (ogf-tile-flood-watch)"
+
+
+def load_state(path):
+    try:
+        with open(path) as f:
+            s = json.load(f)
+        return s
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(path, state):
+    tmp = path + ".tmp"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(tmp, "w") as f:
+        json.dump(state, f)
+    os.replace(tmp, path)
+
+
+def parse_line(line):
+    """Return (minute, address) for a tile request line, else None."""
+    if '".png' not in line and ".png" not in line:
+        return None
+    parts = line.split(" ")
+    if len(parts) < 7:
+        return None
+    addr = parts[0]
+    ts = parts[3]
+    if not ts.startswith("[") or ":" not in ts:
+        return None
+    # [27/Oct/2026:19:16:00 -> 27/Oct/2026:19:16
+    minute = ts[1:18]
+    return minute, addr
+
+
+def range_for(addr):
+    if ":" not in addr:
+        return None
+    return ":".join(addr.split(":")[:4]) + "::/64"
+
+
+def ban(addr, dry_run, extra):
+    cmds = [["cscli", "decisions", "add", "--ip", addr, "--duration", BAN_DURATION, "--reason", REASON + extra]]
+    rng = range_for(addr)
+    if rng:
+        cmds.append(["cscli", "decisions", "add", "--range", rng, "--duration", BAN_DURATION, "--reason", REASON + " /64" + extra])
+    for cmd in cmds:
+        print("BAN" if not dry_run else "DRY-BAN", " ".join(cmd[1:]), flush=True)
+        if dry_run:
+            continue
+        try:
+            subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=20)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print("cscli failed: %s" % exc, file=sys.stderr, flush=True)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--log", default=LOG)
+    ap.add_argument("--state", default=STATE)
+    ap.add_argument("--threshold", type=int, default=12000)
+    ap.add_argument("--window", type=int, default=3, help="minutes to sum over")
+    ap.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args()
+
+    state = load_state(args.state)
+    counts = state.get("counts", {})
+    banned = state.get("banned", {})
+    now = time.time()
+    banned = {a: t for a, t in banned.items() if t > now}
+
+    try:
+        st = os.stat(args.log)
+    except OSError as exc:
+        print("cannot stat %s: %s" % (args.log, exc), file=sys.stderr)
+        return 1
+    if not state and not args.dry_run:
+        # first run: start at the end, never ban on historical lines
+        save_state(args.state, {"inode": st.st_ino, "offset": st.st_size, "counts": {}, "banned": {}})
+        print("initialised at offset %d" % st.st_size, flush=True)
+        return 0
+
+    offset = state.get("offset", 0)
+    if state.get("inode") != st.st_ino or st.st_size < offset:
+        print("log rotated or truncated, reading from start", flush=True)
+        offset = 0
+
+    read_bytes = 0
+    new_lines = 0
+    with open(args.log, "rb") as f:
+        f.seek(offset)
+        for raw in f:
+            read_bytes += len(raw)
+            new_lines += 1
+            try:
+                line = raw.decode("utf-8", "replace")
+            except Exception:
+                continue
+            got = parse_line(line)
+            if not got:
+                continue
+            minute, addr = got
+            bucket = counts.setdefault(minute, {})
+            bucket[addr] = bucket.get(addr, 0) + 1
+            if read_bytes > MAX_READ:
+                print("read cap reached at %d bytes" % read_bytes, flush=True)
+                break
+        offset = f.tell()
+
+    # keep only the most recent minutes
+    keys = sorted(counts)[-max(args.window, 3):]
+    counts = {k: counts[k] for k in keys}
+
+    totals = {}
+    for k in keys[-args.window:]:
+        for addr, n in counts[k].items():
+            totals[addr] = totals.get(addr, 0) + n
+
+    for addr, n in sorted(totals.items(), key=lambda kv: -kv[1]):
+        if n < args.threshold:
+            continue
+        if addr in banned:
+            continue
+        ban(addr, args.dry_run, " %d req/%dmin" % (n, args.window))
+        if not args.dry_run:
+            banned[addr] = now + 12 * 3600
+
+    if not args.dry_run:
+        save_state(args.state, {"inode": st.st_ino, "offset": offset, "counts": counts, "banned": banned})
+    top = sorted(totals.items(), key=lambda kv: -kv[1])[:3]
+    print("lines=%d bytes=%d top=%s" % (new_lines, read_bytes, ", ".join("%s:%d" % kv for kv in top)), flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

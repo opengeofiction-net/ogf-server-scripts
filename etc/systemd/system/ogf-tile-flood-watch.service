@@ -1,0 +1,11 @@
+[Unit]
+Description=Ban bulk tile downloaders from the tiles04 access log
+Documentation=https://github.com/opengeofiction-net/ogf-server-scripts
+After=network-online.target crowdsec.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ogf-tile-flood-watch
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
