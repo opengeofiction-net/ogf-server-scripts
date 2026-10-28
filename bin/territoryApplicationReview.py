@@ -46,6 +46,12 @@ ADMIN_PROPERTIES_URL = "https://data.opengeofiction.net/utility/admin_properties
 IN_PROGRESS_TEMPLATE = "Template:Territory application in progress"
 APPLICATION_NS = "110"                     # Forum:
 
+# A territory code as applicants write it: two letters, 2-3 digits, up to two
+# letters of part suffix. Case is not trusted on either half (AN147B, Ul13e,
+# bg09 all occur); the parse is canonicalised against the administered codes.
+TERRITORY_ID_RE = re.compile(
+    r"(?<![A-Za-z0-9])([A-Za-z]{2})\s?-?\s?(\d{2,3})([A-Za-z]{0,2})(?![A-Za-z0-9])")
+
 USER_AGENT = "OGF-TerritoryReview/1.0 (Brothie adminbot)"
 REFERER = "https://opengeofiction.net/"
 
@@ -196,16 +202,76 @@ def open_applications():
     return sorted(item["title"] for item in data.get("query", {}).get("embeddedin", []))
 
 
-def resolve_territory_id(title, known_ids):
-    """Territory code from the page title ('AN125 ...', 'UL05m - Sardia', 'AN 125 ...')."""
-    for match in re.finditer(r"\b([A-Z]{2})\s?-?(\d{2,3})\s?([a-z])?\b", title):
-        candidate = match.group(1) + match.group(2) + (match.group(3) or "")
-        if candidate in known_ids:
-            return candidate
-    return None
+def territory_index(continents):
+    """Lookups that route a territory code *as applicants write it*.
+
+    Canonical codes are AA123x: two uppercase letters, a number, and a lowercase
+    part letter (AN147b, UL05m). Applicants type them by hand, so any part can
+    arrive in the wrong case (AN147B, UL13G, Ul13e, bg09, ul26e) and the whole
+    code - prefix included - has to be matched case-insensitively.
+
+    Three tiers, each derived from the administered territories rather than
+    hardcoded, tried in order:
+
+        by_code    'an147b' -> 'AN147b'       the exact code, any case
+        by_stem    'an147'  -> continent      same letters and number, any part
+        by_prefix  'an'     -> continent      same letters, any number
+
+    A tier only answers when every territory it could mean agrees on the
+    continent, so UL (East and West Uletha) answers nothing. Codes that differ
+    only in case are dropped rather than guessed: today none do, and if two ever
+    do, the application must land in manual triage instead of the wrong region.
+    """
+    def agree(groups):
+        out = {}
+        for key, found in groups.items():
+            names = {continents[tid] for tid in found}
+            if len(names) == 1:
+                out[key] = names.pop()
+        return out
+
+    by_code, by_stem, by_prefix = {}, {}, {}
+    for tid in continents:
+        by_code.setdefault(tid.casefold(), set()).add(tid)
+        by_stem.setdefault(tid[:5].casefold(), set()).add(tid)
+        by_prefix.setdefault(tid[:2].casefold(), set()).add(tid)
+    return {
+        "continents": dict(continents),
+        "by_code": {key: next(iter(found)) for key, found in by_code.items() if len(found) == 1},
+        "by_stem": agree(by_stem),
+        "by_prefix": agree(by_prefix),
+    }
 
 
-def application_row(title, known_ids, admins):
+def route_territory_id(title, index):
+    """(code, continent, matched_by) for the territory a title is about.
+
+    `code` is the canonical spelling when the code is administered, otherwise
+    the code as written; `matched_by` is 'code', 'stem', 'prefix' or None. The
+    territories themselves are never matched on letters alone when a code on the
+    page resolves exactly - that is the only tier that identifies one territory.
+    """
+    matches = list(TERRITORY_ID_RE.finditer(title))
+    for match in matches:
+        prefix, digits, suffix = match.group(1), match.group(2), match.group(3)
+        written = prefix + digits + suffix
+        # Whole code first: UL30cb is a territory of its own, not UL30c.
+        for candidate in (written, prefix + digits + suffix[:1]):
+            canonical = index["by_code"].get(candidate.casefold())
+            if canonical:
+                return canonical, index["continents"][canonical], "code"
+    for match in matches:
+        stem = (match.group(1) + match.group(2)).casefold()
+        if stem in index["by_stem"]:
+            return match.group(1) + match.group(2) + match.group(3), index["by_stem"][stem], "stem"
+    for match in matches:
+        continent = index["by_prefix"].get(match.group(1).casefold())
+        if continent:
+            return match.group(1) + match.group(2) + match.group(3), continent, "prefix"
+    return None, "Unknown", None
+
+
+def application_row(title, index, admins):
     """Everything the digest needs about one application."""
     data = api({"action": "query", "titles": title, "prop": "revisions", "rvlimit": "100",
                 "rvprop": "timestamp|user|comment|size|ids"})
@@ -230,12 +296,13 @@ def application_row(title, known_ids, admins):
             admin_posts.append(dict(revision, delta=delta))
 
     last = substantive[-1]
-    tid = resolve_territory_id(title, known_ids)
+    tid, continent, matched_by = route_territory_id(title, index)
     return {
         "title": title,
         "pageid": page["pageid"],
         "tid": tid,
-        "continent": known_ids.get(tid, "Unknown") if tid else "Unknown",
+        "continent": continent,
+        "matched_by": matched_by,
         "creator": creator,
         "created": created,
         "age": days_since(created),
@@ -329,10 +396,15 @@ def render(rows, managers, pingable):
         return rest.strip() or row["tid"]
 
     def manager_text(row):
+        if row["continent"] == "Unknown":
+            return "region not determined"
         info = managers.get(row["continent"], {})
         names = info.get("managers", [])
         if names:
-            return " · ".join(names)
+            text = " · ".join(names)
+            if row.get("matched_by") in ("stem", "prefix"):
+                text += " (region inferred - that code is not administered)"
+            return text
         return "no regional manager listed (region not accepting requests)" \
             if info.get("status") == "not accepting" else "no regional manager listed"
 
@@ -389,11 +461,12 @@ def main():
     admins = sysops()
     managers = region_managers()
     known_ids = territory_continents()
+    index = territory_index(known_ids)
     titles = open_applications()
 
     rows = []
     for title in titles:
-        row = application_row(title, known_ids, admins)
+        row = application_row(title, index, admins)
         if row:
             rows.append(row)
     rows.sort(key=lambda r: r["days_in_court"], reverse=True)
@@ -427,7 +500,7 @@ def main():
             "managers": managers,
             "unpingable": sorted(n for n in handles if n.lower() not in pingable),
             "applications": [
-                {k: r[k] for k in ("tid", "title", "continent", "creator", "age",
+                {k: r[k] for k in ("tid", "title", "continent", "matched_by", "creator", "age",
                                    "court", "days_in_court", "admin_posts",
                                    "days_since_admin", "engaged_admins")}
                 for r in rows],
