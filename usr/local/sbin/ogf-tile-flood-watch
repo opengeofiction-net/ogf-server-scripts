@@ -139,8 +139,11 @@ def main():
                 break
         offset = f.tell()
 
-    # keep only the most recent minutes
-    keys = sorted(counts)[-max(args.window, 3):]
+    # keep only the most recent minutes, in arrival order. Sorting the
+    # "DD/Mon/YYYY:HH:MM" keys lexicographically breaks at a month rollover
+    # (31/Oct sorts after 01/Nov), which stranded the counts on the old month
+    # and let the 1 Nov storm run unbanned.
+    keys = list(counts)[-max(args.window, 3):]
     counts = {k: counts[k] for k in keys}
 
     totals = {}
