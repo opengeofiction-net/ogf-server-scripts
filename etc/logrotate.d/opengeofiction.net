@@ -1,0 +1,26 @@
+# Logs under /var/www/html/opengeofiction.net/log/: the site's access.log and
+# error.log (vhost CustomLog/ErrorLog) and turbo-probe.log, a temporary
+# diagnostic CustomLog on element pages. The wildcard is deliberate - every
+# *.log in that directory is a log of record and gets the same 14-day window,
+# so a new CustomLog is covered without touching this file. A second stanza for
+# the same path is a logrotate duplicate-entry error, not a way to vary it.
+#
+# postrotate reloads Apache so a renamed log is reopened without dropping
+# requests, and touches restart.txt because the reload does not restart the
+# Passenger app.
+/var/www/html/opengeofiction.net/log/*.log {
+        daily
+        missingok
+        rotate 14
+        compress
+        delaycompress
+        notifempty
+        create 640 ogf adm
+        sharedscripts
+        postrotate
+                if pgrep -f ^/usr/sbin/apache2 > /dev/null; then
+                    invoke-rc.d apache2 reload 2>&1 | logger -t apache2.logrotate.ogf
+                fi
+                touch /var/www/html/opengeofiction.net/tmp/restart.txt
+        endscript
+}
