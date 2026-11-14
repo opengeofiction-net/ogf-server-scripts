@@ -22,6 +22,12 @@
 # been removed no longer has a raster to derive it from, and its tiles are
 # exactly the ones which have to be redrawn.
 #
+# A style can also ask for the coarse ladder Danu publishes beside the shade -
+# relief-5000, relief-500, hillshade-5000, hillshade-1000, hillshade-500 - by
+# naming the bands in its dem/ladder, one a line. Each is fetched per zone like
+# the shade, the hillshades put through the same ramp, and mosaicked as
+# dem/<band>.vrt. ttopo draws z1-8 from them; cyclogf has no ladder file.
+#
 # Note the data is shared, not per style: one dem directory and one contours
 # database, whatever %i says. Only enable the timer for one style.
 
@@ -58,10 +64,17 @@ OVERVIEWS=${OVERVIEWS:-"2 4 8 16 32 64 128 256 512 1024 2048"}
 TOOLS=${TOOLS:-/opt/opengeofiction/ogf-server-scripts}
 OSM2PGSQL_STYLE=${TOOLS}/etc/cyclogf_contours.style
 RAMP=${RAMP:-/opt/opengeofiction/map-styles/${STYLE}/dem/shade.ramp}
+LADDER_FILE=${LADDER_FILE:-/opt/opengeofiction/map-styles/${STYLE}/dem/ladder}
+LADDER=""
+[ -f ${LADDER_FILE} ] && LADDER=$(grep -v '^#' ${LADDER_FILE} | tr -d ' \t' | grep -v '^$')
 CHANGED_ZONES=${BASE}/changed-zones
 DB=contours
 
 mkdir -p ${BASE}/hillshade ${BASE}/shade ${BASE}/contours
+for BAND in ${LADDER}; do
+	mkdir -p ${BASE}/${BAND}
+	case ${BAND} in hillshade-*) mkdir -p ${BASE}/${BAND}-ramped ;; esac
+done
 
 # One run at a time. The timer and a manual run must not both be rebuilding the
 # VRT, or reloading the database, at once
@@ -168,6 +181,31 @@ for ZONE in ${ZONES}; do
 	# write - there is no .ovr to look for, and asking gdalinfo is the way to
 	# tell. Internal is what we want anyway: an external .ovr would outlive the
 	# next colour-relief pass and be read as though it still described the file
+	# The ladder. Until November 2026 this was a separate script, run once by
+	# hand in August and never again, so the tile server drew z1-8 from
+	# August's rasters: zones built since had no relief at all, and the rest
+	# kept artifacts the build had long since lost. A band that cannot be
+	# fetched is said and left as it was; the zone's shade still loads
+	for BAND in ${LADDER}; do
+		RAW=${BASE}/${BAND}/${ZONE}.tif
+		rc=0; fetch ${SRC}/${ZONE}/${BAND}.tif ${RAW} || rc=$?
+		[ ${rc} -eq 0 ] && ZONE_CHANGED=yes
+		[ -f ${RAW} ] || continue
+		# the hillshades through the ramp, as the shade above: flat ground
+		# transparent, not a lighter box the size of the zone. The relief
+		# is RGBA already
+		case ${BAND} in
+		hillshade-*)
+			OUT=${BASE}/${BAND}-ramped/${ZONE}.tif
+			if [ ! -f ${OUT} ] || [ ${RAW} -nt ${OUT} ] || [ ${RAMP} -nt ${OUT} ]; then
+				gdaldem color-relief -alpha -q ${RAW} ${RAMP} ${OUT} \
+					-co TILED=YES -co COMPRESS=DEFLATE
+				ZONE_CHANGED=yes
+			fi
+			;;
+		esac
+	done
+
 	if [ -n "${ZONE_CHANGED}" ] || ! gdalinfo ${SHADE} | grep -q "Overviews:"; then
 		echo "building overviews"
 		gdaladdo -r average -q --config COMPRESS_OVERVIEW DEFLATE \
@@ -200,6 +238,9 @@ if [ -n "${REMOVALS}" ]; then
 		rm -f ${SHADE} ${SHADE}.ovr ${BASE}/hillshade/${ZONE}.tif \
 			${BASE}/contours/contours-${ZONE}.osm.pbf \
 			${BASE}/sorted/${ZONE}.osm.pbf
+		for BAND in ${LADDER}; do
+			rm -f ${BASE}/${BAND}/${ZONE}.tif ${BASE}/${BAND}-ramped/${ZONE}.tif
+		done
 		REMOVED="${REMOVED} ${ZONE}"
 		CHANGED="${CHANGED} ${ZONE}"
 	done
@@ -236,6 +277,19 @@ echo "=========== changed:${CHANGED} ==========="
 echo "=========== building shade.vrt ==========="
 rm -f ${BASE}/shade.vrt.ovr
 gdalbuildvrt -overwrite ${BASE}/shade.vrt ${BASE}/shade/*.tif
+
+# ----------- the ladder -----------------
+# Each band one mosaic, its sources small enough to need no overviews
+for BAND in ${LADDER}; do
+	DIR=${BASE}/${BAND}
+	case ${BAND} in hillshade-*) DIR=${BASE}/${BAND}-ramped ;; esac
+	if ls ${DIR}/*.tif >/dev/null 2>&1; then
+		echo "=========== building ${BAND}.vrt ==========="
+		gdalbuildvrt -q -overwrite ${BASE}/${BAND}.vrt ${DIR}/*.tif
+	else
+		echo "WARNING: no zone has ${BAND}, ${BAND}.vrt left as it was" >&2
+	fi
+done
 
 # ----------- contours -----------------
 # Loaded from scratch, there being no incremental update to do, and no --slim for

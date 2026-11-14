@@ -45,7 +45,10 @@ bin/renderDemZones.sh <style>
 
 These know nothing about how the rasters were made. They read three published
 files - `active-zones.txt`, `<zone>/hillshade-<zfactor>.tif` and
-`<zone>/contours-<zone>.osm.pbf` - and that is the whole interface.
+`<zone>/contours-<zone>.osm.pbf` - and, for a style whose `dem/ladder` names
+them, the coarse bands `<zone>/<band>.tif` (relief-5000, relief-500,
+hillshade-5000, hillshade-1000, hillshade-500, which ttopo draws at z1-8).
+That is the whole interface.
 
 ### Operational Scripts
 
