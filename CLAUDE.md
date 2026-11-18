@@ -65,6 +65,10 @@ bin/backupPlanetSpinup.sh
 bin/backupWiki.sh
   # Backs up wiki content
 
+bin/backupGit.sh <backup_dir>
+  # forgejo dump of git.opengeofiction.net, run as the git user
+  # Same daily/weekly/monthly/yearly rule; queued as <timeframe>:git:
+
 bin/backupToS3.sh
   # Uploads queued backups to S3 storage
 
@@ -217,6 +221,7 @@ Located in `etc/systemd/system/`:
 **Scheduled Utilities:**
 - `ogfutil-checkContinent.timer` + `.service`: Continent boundary validation
 - `ogfutil-backupWiki.timer`: Wiki backups
+- `ogfutil-backupGit.timer` + `.service`: Forgejo backups, 02:17 (installed by `ogf-infra`)
 - `ogfutil-simplifiedAdminPolygons.timer` + `.service`: Admin boundary simplification
 - `ogfutil-adminPolygonsToMultimap.timer` + `.service`: Export admin boundaries
 - `ogfutil-userList.timer` + `.service`: User list exports

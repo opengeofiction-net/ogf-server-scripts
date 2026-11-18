@@ -1,0 +1,21 @@
+[Unit]
+Description=Backup Forgejo instance
+RequiresMountsFor=/opt/opengeofiction
+After=forgejo.service
+
+[Service]
+# oneshot, so `systemctl start` waits for it: the pre-upgrade backup relies on that
+Type=oneshot
+# forgejo dump must run as the Forgejo user; ogf (supplementary group) owns
+# the S3 queue and reads the dumps through it
+User=git
+Group=git
+SupplementaryGroups=ogf
+UMask=0027
+Nice=10
+Environment=USER=git HOME=/home/git
+WorkingDirectory=/opt/opengeofiction/backup-git
+ExecStart=/opt/opengeofiction/ogf-server-scripts/bin/backupGit.sh /opt/opengeofiction/backup-git
+
+[Install]
+WantedBy=default.target

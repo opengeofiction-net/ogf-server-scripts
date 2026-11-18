@@ -1,0 +1,11 @@
+[Unit]
+Description=Backup Forgejo instance
+
+[Timer]
+# run daily, at 02:17 (UTC), clear of the wiki backup at 03:03
+OnCalendar=02:17
+Persistent=true
+Unit=ogfutil-backupGit.service
+
+[Install]
+WantedBy=timers.target
